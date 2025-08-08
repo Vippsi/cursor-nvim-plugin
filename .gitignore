@@ -1,0 +1,28 @@
+# Vim swap files
+*.swp
+*.swo
+*~
+
+# Neovim session files
+Session.vim
+
+# Temporary files
+*.tmp
+*.temp
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+
+# Test files
+test_*.vim
+test_*.lua 
