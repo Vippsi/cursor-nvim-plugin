@@ -1,10 +1,10 @@
 " autoload/cursor_cli.vim
 " ===================================================================
-" Cursor CLI Plugin - Autoload Functions (Streaming)
-" Provides Cursor IDE-like functionality using the Cursor CLI
+" Cursor CLI Plugin - Autoload Functions
+" - One-shot (non-interactive): cursor_cli#exec() and cursor_cli#exec_stream()
+" - REPL (interactive): cursor_cli#repl_open(), cursor_cli#repl_toggle(), cursor_cli#repl_send()
 "
-" Neovim streaming via jobstart() + on_stdout callbacks.
-" IMPORTANT: uses `pty = v:true` so cursor-agent flushes output incrementally.
+" Neovim required for streaming and REPL.
 "
 " Optional globals:
 "   let g:cursor_cli_command = 'cursor-agent'
@@ -12,21 +12,20 @@
 "   let g:cursor_cli_output_format = 'stream-json'   " 'stream-json' | 'json' | 'text'
 "   let g:cursor_cli_open = 'botright split'
 "   let g:cursor_cli_height = 15
-"   let g:cursor_cli_debug_raw = 0                   " set to 1 to append raw lines
-"   let g:cursor_cli_force_stdbuf = ''               " e.g. 'stdbuf' or 'gstdbuf'
-"
+"   let g:cursor_cli_debug_raw = 0
+"   let g:cursor_cli_force_stdbuf = ''               " 'stdbuf' or 'gstdbuf' (optional)
 " ===================================================================
 
 let s:jobs = {}
+let s:repl = {'bufnr': -1, 'winid': -1, 'jobid': -1}
 
-" Check if cursor CLI is available
 function! cursor_cli#available() abort
   let l:command = get(g:, 'cursor_cli_command', 'cursor-agent')
   return executable(l:command) || executable('cursor-agent')
 endfunction
 
 " -------------------------------------------------------------------
-" Public entrypoint (non-streaming; reliable parsing)
+" One-shot (non-streaming)
 " -------------------------------------------------------------------
 function! cursor_cli#exec(prompt) abort
   if !cursor_cli#available()
@@ -84,33 +83,23 @@ function! cursor_cli#exec(prompt) abort
 endfunction
 
 " -------------------------------------------------------------------
-" Streaming entrypoint: opens a buffer and streams text as it arrives
+" One-shot (streaming to a scratch buffer)
 " -------------------------------------------------------------------
 function! cursor_cli#exec_stream(prompt) abort
   if !has('nvim')
-    echohl ErrorMsg
-    echo "Streaming mode requires Neovim."
-    echohl None
+    echohl ErrorMsg | echo "Streaming mode requires Neovim." | echohl None
     return -1
   endif
-
   if !cursor_cli#available()
-    echohl ErrorMsg
-    echo "Cursor CLI not found. Install with: curl https://cursor.com/install -fsS | bash"
-    echohl None
+    echohl ErrorMsg | echo "Cursor CLI not found (cursor-agent)." | echohl None
     return -1
   endif
 
   let l:command = get(g:, 'cursor_cli_command', 'cursor-agent')
   let l:model = get(g:, 'cursor_cli_model', '')
-  let l:fmt = get(g:, 'cursor_cli_output_format', 'stream-json')
-  if l:fmt !=# 'stream-json'
-    let l:fmt = 'stream-json'
-  endif
+  let l:fmt = 'stream-json'
 
-  " Optional: stdbuf wrapper if you want extra forcing of line buffering
   let l:stdbuf = get(g:, 'cursor_cli_force_stdbuf', '')
-
   if !empty(l:stdbuf)
     let l:args = [l:stdbuf, '-oL', '-eL', l:command, '--print', '--output-format', l:fmt]
   else
@@ -122,17 +111,15 @@ function! cursor_cli#exec_stream(prompt) abort
   endif
   call add(l:args, a:prompt)
 
-  " Create/open result buffer
   let l:open_cmd = get(g:, 'cursor_cli_open', 'botright split')
   let l:height = get(g:, 'cursor_cli_height', 15)
   execute l:open_cmd
   execute 'resize ' . l:height
 
   let l:bufnr = cursor_cli#create_result_buffer('Stream', "Cursor AI working...\n\n", 'enew')
-
   let l:start_time = localtime()
 
-  " KEY: pty=true for streaming flush
+  " pty=true helps cursor-agent flush incrementally
   let l:jobid = jobstart(l:args, {
         \ 'pty': v:true,
         \ 'stdout_buffered': v:false,
@@ -150,7 +137,6 @@ function! cursor_cli#exec_stream(prompt) abort
   let s:jobs[l:jobid] = {
         \ 'bufnr': l:bufnr,
         \ 'start_time': l:start_time,
-        \ 'partial': '',
         \ 'seen_text': 0,
         \ 'final_result': '',
         \ 'done': 0,
@@ -158,17 +144,13 @@ function! cursor_cli#exec_stream(prompt) abort
 
   call cursor_cli#_set_buf_var(l:bufnr, 'cursor_cli_jobid', l:jobid)
   call cursor_cli#_append_to_buf(l:bufnr, ["(job " . l:jobid . ")\n\n"])
-
   echo "Cursor AI streaming... (job " . l:jobid . ")"
   return l:jobid
 endfunction
 
-" Cancel an active streaming job
 function! cursor_cli#cancel(jobid) abort
   if !has_key(s:jobs, a:jobid)
-    echohl WarningMsg
-    echo "No active Cursor job " . a:jobid
-    echohl None
+    echohl WarningMsg | echo "No active Cursor job " . a:jobid | echohl None
     return
   endif
   call jobstop(a:jobid)
@@ -176,7 +158,7 @@ function! cursor_cli#cancel(jobid) abort
 endfunction
 
 " -------------------------------------------------------------------
-" Parsing helpers
+" Parsing helpers (one-shot)
 " -------------------------------------------------------------------
 function! cursor_cli#parse_cursor_output(lines, fmt) abort
   if a:fmt ==# 'text' || empty(a:fmt)
@@ -226,17 +208,14 @@ function! cursor_cli#_extract_text_from_stream_line(line) abort
   if a:line !~# '^\s*{'
     return l:out
   endif
-
   try
     let l:json = json_decode(a:line)
   catch
     return l:out
   endtry
-
   if type(l:json) != v:t_dict || !has_key(l:json, 'type')
     return l:out
   endif
-
   if l:json.type ==# 'assistant'
     if has_key(l:json, 'message') && type(l:json.message) == v:t_dict
       if has_key(l:json.message, 'content') && type(l:json.message.content) == v:t_list
@@ -248,18 +227,16 @@ function! cursor_cli#_extract_text_from_stream_line(line) abort
       endif
     endif
   endif
-
   return l:out
 endfunction
 
 " -------------------------------------------------------------------
-" Job callbacks (Neovim)
+" Streaming job callbacks (scratch buffer)
 " -------------------------------------------------------------------
 function! cursor_cli#_on_stdout(jobid, data, event) abort
   if !has_key(s:jobs, a:jobid)
     return
   endif
-
   let l:st = s:jobs[a:jobid]
   if l:st.done
     return
@@ -269,19 +246,13 @@ function! cursor_cli#_on_stdout(jobid, data, event) abort
     if l:chunk ==# ''
       continue
     endif
-
-    " If a PTY is used, some CLIs may send \r carriage returns
     let l:chunk = substitute(l:chunk, "\r", "", "g")
 
-    " Debug raw chunks if requested
     if get(g:, 'cursor_cli_debug_raw', 0)
       call cursor_cli#_append_to_buf(l:st.bufnr, ["\nRAW: " . l:chunk . "\n"])
     endif
 
-    " stream-json should be one JSON object per line; handle cases where
-    " Neovim delivers multiple lines in one chunk.
-    let l:lines = split(l:chunk, "\n")
-    for l:line in l:lines
+    for l:line in split(l:chunk, "\n")
       if l:line ==# ''
         continue
       endif
@@ -297,7 +268,6 @@ function! cursor_cli#_consume_stream_line(jobid, line) abort
   let l:st = s:jobs[a:jobid]
 
   if a:line !~# '^\s*{'
-    " Non-JSON: append raw (useful for errors / warnings)
     call cursor_cli#_append_to_buf(l:st.bufnr, [a:line . "\n"])
     return
   endif
@@ -305,7 +275,6 @@ function! cursor_cli#_consume_stream_line(jobid, line) abort
   try
     let l:json = json_decode(a:line)
   catch
-    " If JSON decode fails, show raw so you can debug
     call cursor_cli#_append_to_buf(l:st.bufnr, [a:line . "\n"])
     return
   endtry
@@ -314,7 +283,6 @@ function! cursor_cli#_consume_stream_line(jobid, line) abort
     return
   endif
 
-  " First meaningful event clears placeholder
   if !l:st.seen_text
     let l:st.seen_text = 1
     call cursor_cli#_replace_buf(l:st.bufnr, [""])
@@ -362,14 +330,123 @@ function! cursor_cli#_on_exit(jobid, code, event) abort
 
   if a:code != 0 && empty(l:st.final_result)
     call cursor_cli#_append_to_buf(l:st.bufnr, ["\n❌ Cursor AI exited with code " . a:code . " after " . l:duration . "s\n"])
-  elseif empty(l:st.final_result) && !l:st.done
-    call cursor_cli#_append_to_buf(l:st.bufnr, ["\n(ended after " . l:duration . "s)\n"])
   else
     call cursor_cli#_append_to_buf(l:st.bufnr, ["\n\n✅ Done (" . l:duration . "s)\n"])
   endif
 
   call remove(s:jobs, a:jobid)
   echo "✅ Cursor AI finished (job " . a:jobid . ", " . l:duration . "s)"
+endfunction
+
+" -------------------------------------------------------------------
+" REPL / interactive terminal
+" -------------------------------------------------------------------
+function! cursor_cli#repl_open() abort
+  if !has('nvim')
+    echohl ErrorMsg | echo "REPL requires Neovim." | echohl None
+    return
+  endif
+  if !cursor_cli#available()
+    echohl ErrorMsg | echo "Cursor CLI not found (cursor-agent)." | echohl None
+    return
+  endif
+
+  " If it already exists, just focus it
+  if s:repl.winid != -1 && win_id2win(s:repl.winid) != 0
+    call win_gotoid(s:repl.winid)
+    startinsert
+    return
+  endif
+
+  let l:open_cmd = get(g:, 'cursor_cli_open', 'botright split')
+  let l:height = get(g:, 'cursor_cli_height', 15)
+
+  execute l:open_cmd
+  execute 'resize ' . l:height
+
+  " termopen runs an interactive job. No --print, no --output-format.
+  let l:cmd = get(g:, 'cursor_cli_command', 'cursor-agent')
+  let l:model = get(g:, 'cursor_cli_model', '')
+
+  let l:argv = [l:cmd]
+  if !empty(l:model)
+    call extend(l:argv, ['--model', l:model])
+  endif
+
+  " Create a dedicated terminal buffer
+  execute 'enew'
+  execute 'file __CursorREPL__'
+  setlocal buftype=terminal
+  setlocal bufhidden=hide
+  setlocal noswapfile
+
+  let s:repl.bufnr = bufnr('%')
+  let s:repl.winid = win_getid()
+
+  let s:repl.jobid = termopen(l:argv, {
+        \ 'on_exit': function('cursor_cli#_repl_on_exit'),
+        \ })
+
+  " Convenience: store job id for send/stop
+  let b:cursor_cli_repl_jobid = s:repl.jobid
+
+  " Enter insert so you can type immediately
+  startinsert
+endfunction
+
+function! cursor_cli#_repl_on_exit(jobid, code, event) abort
+  " Mark REPL as dead; buffer may still exist
+  let s:repl.jobid = -1
+endfunction
+
+function! cursor_cli#repl_toggle() abort
+  if s:repl.winid != -1 && win_id2win(s:repl.winid) != 0
+    " If focused, hide; else focus
+    if win_getid() == s:repl.winid
+      " close window but keep buffer
+      execute 'close'
+      return
+    endif
+    call win_gotoid(s:repl.winid)
+    startinsert
+    return
+  endif
+
+  " If buffer exists but window closed, reopen it
+  if s:repl.bufnr != -1 && bufexists(s:repl.bufnr)
+    let l:open_cmd = get(g:, 'cursor_cli_open', 'botright split')
+    let l:height = get(g:, 'cursor_cli_height', 15)
+    execute l:open_cmd
+    execute 'resize ' . l:height
+    execute 'buffer ' . s:repl.bufnr
+    let s:repl.winid = win_getid()
+    startinsert
+    return
+  endif
+
+  " Otherwise start fresh
+  call cursor_cli#repl_open()
+endfunction
+
+" Send text to REPL (opens it if needed)
+function! cursor_cli#repl_send(text) abort
+  if !has('nvim')
+    echohl ErrorMsg | echo "REPL requires Neovim." | echohl None
+    return
+  endif
+
+  if s:repl.jobid == -1 || s:repl.bufnr == -1 || !bufexists(s:repl.bufnr)
+    call cursor_cli#repl_open()
+  endif
+
+  " Ensure it’s visible (optional but nice)
+  if s:repl.winid != -1 && win_id2win(s:repl.winid) != 0
+    call win_gotoid(s:repl.winid)
+  endif
+
+  " Send line + newline
+  call chansend(s:repl.jobid, a:text . "\n")
+  startinsert
 endfunction
 
 " -------------------------------------------------------------------
@@ -396,7 +473,6 @@ function! cursor_cli#create_result_buffer(name, content, ...) abort
   %delete _
   call setline(1, split(a:content, '\n'))
   normal! gg
-
   return bufnr('%')
 endfunction
 
