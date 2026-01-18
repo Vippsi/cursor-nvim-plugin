@@ -10,8 +10,9 @@
 "   let g:cursor_cli_command = 'cursor-agent'
 "   let g:cursor_cli_model = 'opus-4.5-thinking'
 "   let g:cursor_cli_output_format = 'stream-json'   " 'stream-json' | 'json' | 'text'
-"   let g:cursor_cli_open = 'botright split'
-"   let g:cursor_cli_height = 15
+"   let g:cursor_cli_open = 'rightbelow vsplit'      " or 'botright split', etc.
+"   let g:cursor_cli_height = 15                     " used for horizontal splits only
+"   let g:cursor_cli_width = 80                      " used for vertical splits only
 "   let g:cursor_cli_debug_raw = 0
 "   let g:cursor_cli_force_stdbuf = ''               " 'stdbuf' or 'gstdbuf' (optional)
 " ===================================================================
@@ -19,6 +20,9 @@
 let s:jobs = {}
 let s:repl = {'bufnr': -1, 'winid': -1, 'jobid': -1}
 
+" -------------------------------------------------------------------
+" Availability
+" -------------------------------------------------------------------
 function! cursor_cli#available() abort
   let l:command = get(g:, 'cursor_cli_command', 'cursor-agent')
   return executable(l:command) || executable('cursor-agent')
@@ -111,10 +115,16 @@ function! cursor_cli#exec_stream(prompt) abort
   endif
   call add(l:args, a:prompt)
 
-  let l:open_cmd = get(g:, 'cursor_cli_open', 'botright split')
+  let l:open_cmd = get(g:, 'cursor_cli_open', 'rightbelow vsplit')
   let l:height = get(g:, 'cursor_cli_height', 15)
+  let l:width = get(g:, 'cursor_cli_width', 80)
+
   execute l:open_cmd
-  execute 'resize ' . l:height
+  if l:open_cmd =~# 'vsplit'
+    execute 'vertical resize ' . l:width
+  else
+    execute 'resize ' . l:height
+  endif
 
   let l:bufnr = cursor_cli#create_result_buffer('Stream', "Cursor AI working...\n\n", 'enew')
   let l:start_time = localtime()
@@ -339,6 +349,8 @@ endfunction
 
 " -------------------------------------------------------------------
 " REPL / interactive terminal
+" IMPORTANT: This implementation opens ONLY ONE window (no bottom pane).
+" It uses g:cursor_cli_open and resizes width for vsplits.
 " -------------------------------------------------------------------
 function! cursor_cli#repl_open() abort
   if !has('nvim')
@@ -350,18 +362,14 @@ function! cursor_cli#repl_open() abort
     return
   endif
 
-  " If it already exists, just focus it
+  " If visible, just focus it
   if s:repl.winid != -1 && win_id2win(s:repl.winid) != 0
     call win_gotoid(s:repl.winid)
     startinsert
     return
   endif
 
-  let l:open_cmd = get(g:, 'cursor_cli_open', 'botright split')
-  let l:height = get(g:, 'cursor_cli_height', 15)
-  execute l:open_cmd
-  execute 'resize ' . l:height
-
+  " Build argv (interactive; no --print)
   let l:cmd = get(g:, 'cursor_cli_command', 'cursor-agent')
   let l:model = get(g:, 'cursor_cli_model', '')
   let l:argv = [l:cmd]
@@ -369,7 +377,16 @@ function! cursor_cli#repl_open() abort
     call extend(l:argv, ['--model', l:model])
   endif
 
-  " Create a dedicated terminal buffer by termopen() (DO NOT set buftype yourself)
+  " Open where user asked
+  let l:open_cmd = get(g:, 'cursor_cli_open', 'rightbelow vsplit')
+  execute l:open_cmd
+
+  " Only resize width for vsplit; never do :resize (height) here
+  if l:open_cmd =~# 'vsplit'
+    execute 'vertical resize ' . get(g:, 'cursor_cli_width', 80)
+  endif
+
+  " Create the terminal buffer in THIS new window
   execute 'enew'
   execute 'file __CursorREPL__'
   setlocal bufhidden=hide
@@ -378,11 +395,10 @@ function! cursor_cli#repl_open() abort
   let s:repl.bufnr = bufnr('%')
   let s:repl.winid = win_getid()
 
-  let s:repl.jobid = termopen(l:argv, {
-        \ 'on_exit': function('cursor_cli#_repl_on_exit'),
-        \ })
-
+  let s:repl.jobid = termopen(l:argv, {'on_exit': function('cursor_cli#_repl_on_exit')})
   let b:cursor_cli_repl_jobid = s:repl.jobid
+  let b:cursor_cli_repl = 1
+
   startinsert
 endfunction
 
@@ -402,10 +418,11 @@ function! cursor_cli#repl_toggle() abort
   endif
 
   if s:repl.bufnr != -1 && bufexists(s:repl.bufnr)
-    let l:open_cmd = get(g:, 'cursor_cli_open', 'botright split')
-    let l:height = get(g:, 'cursor_cli_height', 15)
+    let l:open_cmd = get(g:, 'cursor_cli_open', 'rightbelow vsplit')
     execute l:open_cmd
-    execute 'resize ' . l:height
+    if l:open_cmd =~# 'vsplit'
+      execute 'vertical resize ' . get(g:, 'cursor_cli_width', 80)
+    endif
     execute 'buffer ' . s:repl.bufnr
     let s:repl.winid = win_getid()
     startinsert
@@ -425,12 +442,8 @@ function! cursor_cli#repl_send(text) abort
     call cursor_cli#repl_open()
   endif
 
-  if s:repl.winid != -1 && win_id2win(s:repl.winid) != 0
-    call win_gotoid(s:repl.winid)
-  endif
-
   call chansend(s:repl.jobid, a:text . "\n")
-  startinsert
+  " Don't force focus; user might want to keep typing in code buffer
 endfunction
 
 " -------------------------------------------------------------------
