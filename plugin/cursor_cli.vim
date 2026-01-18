@@ -14,15 +14,11 @@ let g:cursor_cli_output_format = get(g:, 'cursor_cli_output_format', 'stream-jso
 let g:cursor_cli_open = get(g:, 'cursor_cli_open', 'botright split')
 let g:cursor_cli_height = get(g:, 'cursor_cli_height', 15)
 
-" -------------------------------------------------------------------
-" High-level UX wrappers
-" -------------------------------------------------------------------
 function! CursorChat() abort
   let l:q = input('💬 Ask Cursor AI (one-shot): ')
   if empty(l:q)
     return
   endif
-  " One-shot streaming scratch buffer (not REPL)
   call cursor_cli#exec_stream(cursor_cli#create_prompt_with_context(l:q))
 endfunction
 
@@ -39,9 +35,6 @@ function! CursorTest() abort
   endif
 endfunction
 
-" -------------------------------------------------------------------
-" REPL commands
-" -------------------------------------------------------------------
 function! CursorREPL() abort
   call cursor_cli#repl_open()
 endfunction
@@ -65,9 +58,6 @@ function! CursorREPLSend(...) abort
   call cursor_cli#repl_send(l:line)
 endfunction
 
-" -------------------------------------------------------------------
-" Commands
-" -------------------------------------------------------------------
 command! CursorStatus echo cursor_cli#available() ? "✅ Cursor CLI available" : "❌ Cursor CLI not found"
 command! CursorTest call CursorTest()
 
