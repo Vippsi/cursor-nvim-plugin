@@ -1,9 +1,9 @@
+" plugin/cursor_cli.vim
 " ===================================================================
 " Cursor CLI Plugin for Neovim
-" Provides Cursor IDE-like functionality using the Cursor CLI
-" Author: ross (with AI assistance) + updates
-" Version: 1.1
-" License: MIT
+" Commands + UX wrappers around autoload/cursor_cli.vim
+"
+" Version: 1.1 (streaming)
 " ===================================================================
 
 if exists('g:loaded_cursor_cli') || !has('nvim')
@@ -11,23 +11,14 @@ if exists('g:loaded_cursor_cli') || !has('nvim')
 endif
 let g:loaded_cursor_cli = 1
 
-" -------------------------------------------------------------------
-" Configuration (safe defaults)
-" -------------------------------------------------------------------
+" Configuration defaults (safe)
 let g:cursor_cli_command = get(g:, 'cursor_cli_command', 'cursor-agent')
-
-" You DO have opus-4.5-thinking per your installed cursor-agent model list,
-" and it’s also your current default.
 let g:cursor_cli_model = get(g:, 'cursor_cli_model', 'opus-4.5-thinking')
-
-" Output format:
-" - For streaming UI: stream-json
-" - For reliable non-streaming: json
 let g:cursor_cli_output_format = get(g:, 'cursor_cli_output_format', 'stream-json')
 
-" Streaming UI preferences
 let g:cursor_cli_open = get(g:, 'cursor_cli_open', 'botright split')
 let g:cursor_cli_height = get(g:, 'cursor_cli_height', 15)
+let g:cursor_cli_debug_raw = get(g:, 'cursor_cli_debug_raw', 0)
 
 " -------------------------------------------------------------------
 " Helpers
@@ -37,12 +28,10 @@ function! s:prompt_with_context(question) abort
 endfunction
 
 function! s:run(prompt) abort
-  " If user configured stream-json, use streaming buffer.
   if get(g:, 'cursor_cli_output_format', 'stream-json') ==# 'stream-json'
     return cursor_cli#exec_stream(a:prompt)
   endif
 
-  " Otherwise use non-streaming call and show results.
   let l:resp = cursor_cli#exec(a:prompt)
   if !empty(l:resp)
     call cursor_cli#create_result_buffer('Chat', l:resp)
@@ -51,7 +40,6 @@ function! s:run(prompt) abort
 endfunction
 
 function! s:get_visual_or_line(first, last) abort
-  " If not a real visual range, use current line.
   if a:first == a:last && col("'<") == col("'>")
     return [getline('.'), line('.'), line('.')]
   endif
@@ -61,18 +49,14 @@ endfunction
 " -------------------------------------------------------------------
 " Main Functions
 " -------------------------------------------------------------------
-
-" Chat with Cursor AI (like Cursor IDE sidebar)
 function! CursorChat() abort
   let l:q = input('💬 Ask Cursor AI: ')
   if empty(l:q)
     return
   endif
-
   call s:run(s:prompt_with_context(l:q))
 endfunction
 
-" Explain selected code
 function! CursorExplain() range abort
   let l:code = join(getline(a:firstline, a:lastline), "\n")
   if empty(trim(l:code))
@@ -80,15 +64,10 @@ function! CursorExplain() range abort
     return
   endif
 
-  let l:prompt = printf(
-        \ "Explain this %s code from %s:\n\n%s",
-        \ expand('%:e'), expand('%:t'), l:code
-        \ )
-
+  let l:prompt = printf("Explain this %s code from %s:\n\n%s", expand('%:e'), expand('%:t'), l:code)
   call s:run(s:prompt_with_context(l:prompt))
 endfunction
 
-" Review current file
 function! CursorReview() abort
   let l:file = expand('%:p')
   if empty(l:file) || !filereadable(l:file)
@@ -101,11 +80,9 @@ function! CursorReview() abort
         \ "Review this %s code for best practices, bugs, and improvements:\n\nFile: %s\n\n%s",
         \ expand('%:e'), expand('%:t'), l:file_content
         \ )
-
   call s:run(s:prompt_with_context(l:prompt))
 endfunction
 
-" Generate code from instruction (inserts into buffer)
 function! CursorGenerate() abort
   let l:current_line = getline('.')
   let l:default = l:current_line =~ '^\s*[#/"\*].*' ? l:current_line : ''
@@ -119,8 +96,7 @@ function! CursorGenerate() abort
         \ expand('%:e'), l:instruction, expand('%:t'), &filetype
         \ )
 
-  " For generate/edit, streaming is less convenient because we want the final text.
-  " Temporarily force non-streaming JSON for these operations.
+  " Force non-streaming json so we can insert the final exact output
   let l:old_fmt = get(g:, 'cursor_cli_output_format', 'stream-json')
   let g:cursor_cli_output_format = 'json'
   let l:result = cursor_cli#exec(s:prompt_with_context(l:prompt))
@@ -132,7 +108,6 @@ function! CursorGenerate() abort
   endif
 endfunction
 
-" Edit selected code with AI instructions (shows diff, optional apply)
 function! CursorEdit() range abort
   let l:instruction = input('✏️  Edit instruction: ')
   if empty(l:instruction)
@@ -140,12 +115,12 @@ function! CursorEdit() range abort
   endif
 
   let [l:original_code, l:start_line, l:end_line] = s:get_visual_or_line(a:firstline, a:lastline)
+
   let l:prompt = printf(
         \ "Edit this %s code according to the instruction.\n\nFile: %s\nInstruction: %s\n\nOriginal code:\n%s\n\nProvide only the edited code:",
         \ expand('%:e'), expand('%:t'), l:instruction, l:original_code
         \ )
 
-  " Use non-streaming for edit so we can apply exact final output
   let l:old_fmt = get(g:, 'cursor_cli_output_format', 'stream-json')
   let g:cursor_cli_output_format = 'json'
   let l:result = cursor_cli#exec(s:prompt_with_context(l:prompt))
@@ -157,7 +132,6 @@ function! CursorEdit() range abort
   endif
 
   call cursor_cli#create_result_buffer('Diff', "ORIGINAL:\n" . l:original_code . "\n\nEDITED:\n" . l:result, 'vnew')
-
   echo "Apply changes? (y/n): "
   let l:choice = nr2char(getchar())
 
@@ -166,13 +140,11 @@ function! CursorEdit() range abort
     call append(l:start_line - 1, split(l:result, "\n"))
     echo "✅ Changes applied!"
   else
-    " Close diff buffer by name (best-effort)
     silent! bwipeout __CursorDiff__
     echo "❌ Changes discarded"
   endif
 endfunction
 
-" Optimize selected code (shows diff, optional apply)
 function! CursorOptimize() range abort
   let l:code = join(getline(a:firstline, a:lastline), "\n")
   if empty(trim(l:code))
@@ -196,7 +168,6 @@ function! CursorOptimize() range abort
   endif
 
   call cursor_cli#create_result_buffer('Optimization', "ORIGINAL:\n" . l:code . "\n\nOPTIMIZED:\n" . l:result, 'vnew')
-
   echo "Apply optimization? (y/n): "
   let l:choice = nr2char(getchar())
 
@@ -210,7 +181,6 @@ function! CursorOptimize() range abort
   endif
 endfunction
 
-" Fix errors in selected code (shows diff, optional apply)
 function! CursorFix() range abort
   let l:code = join(getline(a:firstline, a:lastline), "\n")
   if empty(trim(l:code))
@@ -234,7 +204,6 @@ function! CursorFix() range abort
   endif
 
   call cursor_cli#create_result_buffer('Fix', "ORIGINAL:\n" . l:code . "\n\nFIXED:\n" . l:result, 'vnew')
-
   echo "Apply fix? (y/n): "
   let l:choice = nr2char(getchar())
 
@@ -248,7 +217,6 @@ function! CursorFix() range abort
   endif
 endfunction
 
-" Quick refactor with a mini menu
 function! CursorRefactor() range abort
   echo "Refactor options:"
   echo "1. Extract function"
@@ -300,7 +268,6 @@ function! CursorRefactor() range abort
   endif
 
   call cursor_cli#create_result_buffer('Refactor', "ORIGINAL:\n" . l:code . "\n\nREFACTORED:\n" . l:result, 'vnew')
-
   echo "Apply refactor? (y/n): "
   let l:apply = nr2char(getchar())
 
@@ -314,7 +281,6 @@ function! CursorRefactor() range abort
   endif
 endfunction
 
-" Test Cursor CLI with a simple prompt
 function! CursorTest() abort
   echo "Testing Cursor CLI connection..."
   let l:old_fmt = get(g:, 'cursor_cli_output_format', 'stream-json')
@@ -329,7 +295,6 @@ function! CursorTest() abort
   endif
 endfunction
 
-" Stop the most recent streaming job in the current Cursor buffer
 function! CursorStop() abort
   let l:jobid = getbufvar(bufnr('%'), 'cursor_cli_jobid', -1)
   if l:jobid == -1
@@ -351,10 +316,8 @@ command! -range CursorOptimize <line1>,<line2>call CursorOptimize()
 command! -range CursorFix <line1>,<line2>call CursorFix()
 command! -range CursorRefactor <line1>,<line2>call CursorRefactor()
 
-" Status and test functions
 command! CursorStatus echo cursor_cli#available() ? "✅ Cursor CLI available" : "❌ Cursor CLI not found"
 command! CursorTest call CursorTest()
 
-" Streaming-specific commands
 command! -nargs=1 CursorStream call cursor_cli#exec_stream(<q-args>)
 command! CursorStop call CursorStop()
