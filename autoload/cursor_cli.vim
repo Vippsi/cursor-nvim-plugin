@@ -1,18 +1,19 @@
+" autoload/cursor_cli.vim
 " ===================================================================
 " Cursor CLI Plugin - Autoload Functions (Streaming)
 " Provides Cursor IDE-like functionality using the Cursor CLI
 "
-" Updated to support TRUE streaming into a Vim buffer using jobstart()
-" with on_stdout callbacks + --output-format stream-json.
-"
-" Works best in Neovim (jobstart callbacks). For Vim8 you can adapt to job_start().
+" Neovim streaming via jobstart() + on_stdout callbacks.
+" IMPORTANT: uses `pty = v:true` so cursor-agent flushes output incrementally.
 "
 " Optional globals:
 "   let g:cursor_cli_command = 'cursor-agent'
-"   let g:cursor_cli_model = 'opus-4.5-thinking'  " or 'auto', etc.
-"   let g:cursor_cli_output_format = 'stream-json' " 'stream-json' | 'json' | 'text'
-"   let g:cursor_cli_open = 'botright split'       " where to open results
-"   let g:cursor_cli_height = 15                   " split height
+"   let g:cursor_cli_model = 'opus-4.5-thinking'     " or 'auto', etc.
+"   let g:cursor_cli_output_format = 'stream-json'   " 'stream-json' | 'json' | 'text'
+"   let g:cursor_cli_open = 'botright split'
+"   let g:cursor_cli_height = 15
+"   let g:cursor_cli_debug_raw = 0                   " set to 1 to append raw lines
+"   let g:cursor_cli_force_stdbuf = ''               " e.g. 'stdbuf' or 'gstdbuf'
 "
 " ===================================================================
 
@@ -25,7 +26,7 @@ function! cursor_cli#available() abort
 endfunction
 
 " -------------------------------------------------------------------
-" Public entrypoint (non-streaming, reliable parsing)
+" Public entrypoint (non-streaming; reliable parsing)
 " -------------------------------------------------------------------
 function! cursor_cli#exec(prompt) abort
   if !cursor_cli#available()
@@ -88,7 +89,7 @@ endfunction
 function! cursor_cli#exec_stream(prompt) abort
   if !has('nvim')
     echohl ErrorMsg
-    echo "Streaming mode requires Neovim (jobstart() + on_stdout)."
+    echo "Streaming mode requires Neovim."
     echohl None
     return -1
   endif
@@ -103,13 +104,19 @@ function! cursor_cli#exec_stream(prompt) abort
   let l:command = get(g:, 'cursor_cli_command', 'cursor-agent')
   let l:model = get(g:, 'cursor_cli_model', '')
   let l:fmt = get(g:, 'cursor_cli_output_format', 'stream-json')
-
-  " Streaming expects stream-json
   if l:fmt !=# 'stream-json'
     let l:fmt = 'stream-json'
   endif
 
-  let l:args = [l:command, '--print', '--output-format', l:fmt]
+  " Optional: stdbuf wrapper if you want extra forcing of line buffering
+  let l:stdbuf = get(g:, 'cursor_cli_force_stdbuf', '')
+
+  if !empty(l:stdbuf)
+    let l:args = [l:stdbuf, '-oL', '-eL', l:command, '--print', '--output-format', l:fmt]
+  else
+    let l:args = [l:command, '--print', '--output-format', l:fmt]
+  endif
+
   if !empty(l:model)
     call extend(l:args, ['--model', l:model])
   endif
@@ -123,10 +130,11 @@ function! cursor_cli#exec_stream(prompt) abort
 
   let l:bufnr = cursor_cli#create_result_buffer('Stream', "Cursor AI working...\n\n", 'enew')
 
-  " Start job
   let l:start_time = localtime()
 
+  " KEY: pty=true for streaming flush
   let l:jobid = jobstart(l:args, {
+        \ 'pty': v:true,
         \ 'stdout_buffered': v:false,
         \ 'stderr_buffered': v:false,
         \ 'on_stdout': function('cursor_cli#_on_stdout'),
@@ -155,7 +163,7 @@ function! cursor_cli#exec_stream(prompt) abort
   return l:jobid
 endfunction
 
-" Cancel an active streaming job (if you want a command mapping)
+" Cancel an active streaming job
 function! cursor_cli#cancel(jobid) abort
   if !has_key(s:jobs, a:jobid)
     echohl WarningMsg
@@ -188,7 +196,6 @@ function! cursor_cli#parse_cursor_output(lines, fmt) abort
   endif
 
   if a:fmt ==# 'stream-json'
-    " Try final result line first
     for l:line in a:lines
       if l:line =~# '"type":"result"'
         try
@@ -201,7 +208,6 @@ function! cursor_cli#parse_cursor_output(lines, fmt) abort
       endif
     endfor
 
-    " Fallback: concatenate assistant text
     let l:parts = []
     for l:line in a:lines
       let l:texts = cursor_cli#_extract_text_from_stream_line(l:line)
@@ -216,7 +222,6 @@ function! cursor_cli#parse_cursor_output(lines, fmt) abort
 endfunction
 
 function! cursor_cli#_extract_text_from_stream_line(line) abort
-  " Returns a list of text fragments extracted from a single JSONL line
   let l:out = []
   if a:line !~# '^\s*{'
     return l:out
@@ -228,7 +233,6 @@ function! cursor_cli#_extract_text_from_stream_line(line) abort
     return l:out
   endtry
 
-  " Cursor CLI stream-json commonly emits objects with "type"
   if type(l:json) != v:t_dict || !has_key(l:json, 'type')
     return l:out
   endif
@@ -261,27 +265,28 @@ function! cursor_cli#_on_stdout(jobid, data, event) abort
     return
   endif
 
-  " data is a list of lines; the last element can be '' due to newline handling
   for l:chunk in a:data
     if l:chunk ==# ''
       continue
     endif
 
-    " Handle partial lines (just in case)
-    let l:line = l:st.partial . l:chunk
-    let l:st.partial = ''
+    " If a PTY is used, some CLIs may send \r carriage returns
+    let l:chunk = substitute(l:chunk, "\r", "", "g")
 
-    " stream-json should be one JSON object per line.
-    " If we ever receive concatenated lines, split on \n.
-    let l:lines = split(l:line, "\n")
-    if len(l:lines) > 1
-      " keep last as partial if it doesn't look complete
-      for l:i in range(0, len(l:lines)-1)
-        call cursor_cli#_consume_stream_line(a:jobid, l:lines[l:i])
-      endfor
-    else
-      call cursor_cli#_consume_stream_line(a:jobid, l:line)
+    " Debug raw chunks if requested
+    if get(g:, 'cursor_cli_debug_raw', 0)
+      call cursor_cli#_append_to_buf(l:st.bufnr, ["\nRAW: " . l:chunk . "\n"])
     endif
+
+    " stream-json should be one JSON object per line; handle cases where
+    " Neovim delivers multiple lines in one chunk.
+    let l:lines = split(l:chunk, "\n")
+    for l:line in l:lines
+      if l:line ==# ''
+        continue
+      endif
+      call cursor_cli#_consume_stream_line(a:jobid, l:line)
+    endfor
   endfor
 endfunction
 
@@ -291,9 +296,8 @@ function! cursor_cli#_consume_stream_line(jobid, line) abort
   endif
   let l:st = s:jobs[a:jobid]
 
-  " Try parse JSON
   if a:line !~# '^\s*{'
-    " Non-JSON: append raw (useful for debugging)
+    " Non-JSON: append raw (useful for errors / warnings)
     call cursor_cli#_append_to_buf(l:st.bufnr, [a:line . "\n"])
     return
   endif
@@ -301,7 +305,7 @@ function! cursor_cli#_consume_stream_line(jobid, line) abort
   try
     let l:json = json_decode(a:line)
   catch
-    " Not parseable yet
+    " If JSON decode fails, show raw so you can debug
     call cursor_cli#_append_to_buf(l:st.bufnr, [a:line . "\n"])
     return
   endtry
@@ -310,7 +314,7 @@ function! cursor_cli#_consume_stream_line(jobid, line) abort
     return
   endif
 
-  " If we haven't printed anything yet, remove the "working..." placeholder
+  " First meaningful event clears placeholder
   if !l:st.seen_text
     let l:st.seen_text = 1
     call cursor_cli#_replace_buf(l:st.bufnr, [""])
@@ -320,25 +324,19 @@ function! cursor_cli#_consume_stream_line(jobid, line) abort
     if has_key(l:json, 'result')
       let l:st.final_result = l:json.result
       let l:st.done = 1
-
-      " Replace buffer with final result (clean)
       call cursor_cli#_replace_buf(l:st.bufnr, split(l:st.final_result, "\n"))
       call cursor_cli#_append_to_buf(l:st.bufnr, ["\n"])
     endif
     return
   endif
 
-  " Stream assistant text content
   if l:json.type ==# 'assistant'
     let l:texts = cursor_cli#_extract_text_from_stream_line(a:line)
     if !empty(l:texts)
-      " Append without adding extra newlines unless the model includes them
       call cursor_cli#_append_to_buf(l:st.bufnr, l:texts)
     endif
     return
   endif
-
-  " Other event types: ignore (or append for debugging)
 endfunction
 
 function! cursor_cli#_on_stderr(jobid, data, event) abort
@@ -365,15 +363,12 @@ function! cursor_cli#_on_exit(jobid, code, event) abort
   if a:code != 0 && empty(l:st.final_result)
     call cursor_cli#_append_to_buf(l:st.bufnr, ["\n❌ Cursor AI exited with code " . a:code . " after " . l:duration . "s\n"])
   elseif empty(l:st.final_result) && !l:st.done
-    " Sometimes you might not get a result object; keep what streamed
     call cursor_cli#_append_to_buf(l:st.bufnr, ["\n(ended after " . l:duration . "s)\n"])
   else
     call cursor_cli#_append_to_buf(l:st.bufnr, ["\n\n✅ Done (" . l:duration . "s)\n"])
   endif
 
-  " Remove from job table
   call remove(s:jobs, a:jobid)
-
   echo "✅ Cursor AI finished (job " . a:jobid . ", " . l:duration . "s)"
 endfunction
 
@@ -381,8 +376,6 @@ endfunction
 " Buffer helpers
 " -------------------------------------------------------------------
 function! cursor_cli#create_result_buffer(name, content, ...) abort
-  " a:1 optionally indicates how to create/open the buffer.
-  " If passed 'enew', uses current window.
   let l:how = a:0 > 0 ? a:1 : 'split'
 
   if l:how !=# 'enew'
@@ -400,7 +393,6 @@ function! cursor_cli#create_result_buffer(name, content, ...) abort
   setlocal linebreak
   setlocal filetype=markdown
 
-  " Clear buffer and set content
   %delete _
   call setline(1, split(a:content, '\n'))
   normal! gg
@@ -413,7 +405,6 @@ function! cursor_cli#_append_to_buf(bufnr, lines) abort
     return
   endif
 
-  " Append at end; keep cursor at end
   let l:win = bufwinid(a:bufnr)
   if l:win != -1
     call win_execute(l:win, 'setlocal modifiable')
@@ -422,7 +413,6 @@ function! cursor_cli#_append_to_buf(bufnr, lines) abort
     call win_execute(l:win, 'silent! keepjumps $')
     call win_execute(l:win, 'setlocal nomodifiable')
   else
-    " Buffer not visible; still append
     call setbufvar(a:bufnr, '&modifiable', 1)
     call appendbufline(a:bufnr, '$', a:lines)
     call setbufvar(a:bufnr, '&modifiable', 0)
@@ -443,7 +433,6 @@ function! cursor_cli#_replace_buf(bufnr, lines) abort
   else
     call setbufvar(a:bufnr, '&modifiable', 1)
     call setbufline(a:bufnr, 1, a:lines)
-    " best effort: delete extra lines if any
     let l:lnum = len(a:lines) + 1
     while l:lnum <= line('$', a:bufnr)
       call deletebufline(a:bufnr, l:lnum)
@@ -459,7 +448,7 @@ function! cursor_cli#_set_buf_var(bufnr, name, value) abort
 endfunction
 
 " -------------------------------------------------------------------
-" Context helpers (unchanged)
+" Context helpers
 " -------------------------------------------------------------------
 function! cursor_cli#get_file_context() abort
   let l:context = ""
