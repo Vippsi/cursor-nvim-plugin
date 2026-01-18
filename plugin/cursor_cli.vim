@@ -1,273 +1,347 @@
 " ===================================================================
 " Cursor CLI Plugin for Neovim
 " Provides Cursor IDE-like functionality using the Cursor CLI
-" Author: ross (with AI assistance)
-" Version: 1.0
+" Author: ross (with AI assistance) + updates
+" Version: 1.1
 " License: MIT
 " ===================================================================
 
 if exists('g:loaded_cursor_cli') || !has('nvim')
-    finish
+  finish
 endif
 let g:loaded_cursor_cli = 1
 
-" Configuration
+" -------------------------------------------------------------------
+" Configuration (safe defaults)
+" -------------------------------------------------------------------
 let g:cursor_cli_command = get(g:, 'cursor_cli_command', 'cursor-agent')
-let g:cursor_cli_model = get(g:, 'cursor_cli_model', 'sonnet-4')
 
-" Use autoload functions for better performance
-" All core functionality is now in autoload/cursor_cli.vim
+" You DO have opus-4.5-thinking per your installed cursor-agent model list,
+" and it’s also your current default.
+let g:cursor_cli_model = get(g:, 'cursor_cli_model', 'opus-4.5-thinking')
 
-" ===================================================================
+" Output format:
+" - For streaming UI: stream-json
+" - For reliable non-streaming: json
+let g:cursor_cli_output_format = get(g:, 'cursor_cli_output_format', 'stream-json')
+
+" Streaming UI preferences
+let g:cursor_cli_open = get(g:, 'cursor_cli_open', 'botright split')
+let g:cursor_cli_height = get(g:, 'cursor_cli_height', 15)
+
+" -------------------------------------------------------------------
+" Helpers
+" -------------------------------------------------------------------
+function! s:prompt_with_context(question) abort
+  return cursor_cli#create_prompt_with_context(a:question)
+endfunction
+
+function! s:run(prompt) abort
+  " If user configured stream-json, use streaming buffer.
+  if get(g:, 'cursor_cli_output_format', 'stream-json') ==# 'stream-json'
+    return cursor_cli#exec_stream(a:prompt)
+  endif
+
+  " Otherwise use non-streaming call and show results.
+  let l:resp = cursor_cli#exec(a:prompt)
+  if !empty(l:resp)
+    call cursor_cli#create_result_buffer('Chat', l:resp)
+  endif
+  return 0
+endfunction
+
+function! s:get_visual_or_line(first, last) abort
+  " If not a real visual range, use current line.
+  if a:first == a:last && col("'<") == col("'>")
+    return [getline('.'), line('.'), line('.')]
+  endif
+  return [join(getline(a:first, a:last), "\n"), a:first, a:last]
+endfunction
+
+" -------------------------------------------------------------------
 " Main Functions
-" ===================================================================
+" -------------------------------------------------------------------
 
 " Chat with Cursor AI (like Cursor IDE sidebar)
-function! CursorChat()
-    let l:question = input('💬 Ask Cursor AI: ')
-    if empty(l:question)
-        return
-    endif
-    
-    " Add context about current file if available
-    let l:context = ""
-    if expand('%') != ""
-        let l:context = printf(" (Context: working on %s)", expand('%:t'))
-    endif
-    
-    let l:prompt = cursor_cli#create_prompt_with_context(l:question)
-    let l:response = cursor_cli#exec(l:prompt)
-    if !empty(l:response)
-        call cursor_cli#create_result_buffer('Chat', l:response)
-        echo "✅ Chat response ready!"
-    endif
-endfunction
+function! CursorChat() abort
+  let l:q = input('💬 Ask Cursor AI: ')
+  if empty(l:q)
+    return
+  endif
 
-" Edit selected code with AI instructions
-function! CursorEdit() range
-    let l:instruction = input('✏️  Edit instruction: ')
-    if empty(l:instruction)
-        return
-    endif
-    
-    " Get selected text or current line
-    if a:firstline == a:lastline && col("'<") == col("'>")
-        let l:lines = [getline('.')]
-        let l:start_line = line('.')
-        let l:end_line = line('.')
-    else
-        let l:lines = getline(a:firstline, a:lastline)
-        let l:start_line = a:firstline
-        let l:end_line = a:lastline
-    endif
-    
-    let l:original_code = join(l:lines, "\n")
-    
-    " Create prompt with context
-    let l:prompt = printf("Edit this %s code according to the instruction.\n\nFile: %s\nInstruction: %s\n\nOriginal code:\n%s\n\nProvide only the edited code:", 
-        \ expand('%:e'), expand('%:t'), l:instruction, l:original_code)
-    
-    let l:result = cursor_cli#exec(l:prompt)
-    
-    if !empty(l:result)
-        " Create diff view
-        call cursor_cli#create_result_buffer('Diff', "ORIGINAL:\n" . l:original_code . "\n\nEDITED:\n" . l:result, 'vnew')
-        
-        echo "Apply changes? (y/n/v for view only): "
-        let l:choice = nr2char(getchar())
-        
-        if l:choice ==# 'y'
-            " Replace selected lines
-            execute l:start_line . ',' . l:end_line . 'delete'
-            call append(l:start_line - 1, split(l:result, '\n'))
-            echo "✅ Changes applied!"
-        elseif l:choice ==# 'v'
-            echo "📖 View mode - close buffer when done"
-            return
-        else
-            bwipeout __CursorDiff__
-            echo "❌ Changes discarded"
-        endif
-    endif
-endfunction
-
-" Generate code from instruction
-function! CursorGenerate()
-    let l:current_line = getline('.')
-    let l:default = l:current_line =~ '^\s*[#/"\*].*' ? l:current_line : ''
-    let l:instruction = input('🚀 Generate code: ', l:default)
-    
-    if empty(l:instruction)
-        return
-    endif
-    
-    " Create generation prompt
-    let l:prompt = printf("Generate %s code for: %s\n\nFile context: %s (%s)\n\nProvide only the code without explanations:", 
-        \ expand('%:e'), l:instruction, expand('%:t'), &filetype)
-    let l:result = cursor_cli#exec(l:prompt)
-    
-    if !empty(l:result)
-        " Insert at current position
-        let l:lines = split(l:result, '\n')
-        call append(line('.'), l:lines)
-        echo printf("✅ Generated %d lines of code!", len(l:lines))
-    endif
+  call s:run(s:prompt_with_context(l:q))
 endfunction
 
 " Explain selected code
-function! CursorExplain() range
-    let l:lines = getline(a:firstline, a:lastline)
-    let l:code = join(l:lines, '\n')
-    
-    if empty(trim(l:code))
-        echo "No code selected to explain"
-        return
-    endif
-    
-    let l:prompt = printf("Explain this %s code from %s:\n\n%s", expand('%:e'), expand('%:t'), l:code)
-    let l:explanation = cursor_cli#exec(l:prompt)
-    
-    if !empty(l:explanation)
-        call cursor_cli#create_result_buffer('Explanation', l:explanation)
-        echo "📖 Code explanation ready!"
-    endif
+function! CursorExplain() range abort
+  let l:code = join(getline(a:firstline, a:lastline), "\n")
+  if empty(trim(l:code))
+    echo "No code selected to explain"
+    return
+  endif
+
+  let l:prompt = printf(
+        \ "Explain this %s code from %s:\n\n%s",
+        \ expand('%:e'), expand('%:t'), l:code
+        \ )
+
+  call s:run(s:prompt_with_context(l:prompt))
 endfunction
 
 " Review current file
-function! CursorReview()
-    let l:current_file = expand('%:p')
-    if empty(l:current_file) || !filereadable(l:current_file)
-        echo "No readable file to review"
-        return
-    endif
-    
-    " Read file content for review
-    let l:file_content = join(readfile(l:current_file), "\n")
-    let l:prompt = printf("Review this %s code for best practices, bugs, and improvements:\n\nFile: %s\n\n%s", expand('%:e'), expand('%:t'), l:file_content)
-    let l:review = cursor_cli#exec(l:prompt)
-    
-    if !empty(l:review)
-        call cursor_cli#create_result_buffer('Review', l:review)
-        echo "🔍 Code review ready!"
-    endif
+function! CursorReview() abort
+  let l:file = expand('%:p')
+  if empty(l:file) || !filereadable(l:file)
+    echo "No readable file to review"
+    return
+  endif
+
+  let l:file_content = join(readfile(l:file), "\n")
+  let l:prompt = printf(
+        \ "Review this %s code for best practices, bugs, and improvements:\n\nFile: %s\n\n%s",
+        \ expand('%:e'), expand('%:t'), l:file_content
+        \ )
+
+  call s:run(s:prompt_with_context(l:prompt))
 endfunction
 
-" Optimize selected code
-function! CursorOptimize() range
-    let l:lines = getline(a:firstline, a:lastline)
-    let l:code = join(l:lines, '\n')
-    
-    let l:prompt = printf("Optimize this %s code for better performance and readability:\n\nFile: %s\n\nOriginal code:\n%s\n\nProvide only the optimized code:", expand('%:e'), expand('%:t'), l:code)
-    let l:result = cursor_cli#exec(l:prompt)
-    
-    if !empty(l:result)
-        call cursor_cli#create_result_buffer('Optimization', "ORIGINAL:\n" . l:code . "\n\nOPTIMIZED:\n" . l:result, 'vnew')
-        
-        echo "Apply optimization? (y/n): "
-        let l:choice = nr2char(getchar())
-        
-        if l:choice ==# 'y'
-            execute a:firstline . ',' . a:lastline . 'delete'
-            call append(a:firstline - 1, split(l:result, '\n'))
-            echo "✅ Code optimized!"
-        else
-            bwipeout __CursorOptimization__
-            echo "❌ Optimization discarded"
-        endif
-    endif
+" Generate code from instruction (inserts into buffer)
+function! CursorGenerate() abort
+  let l:current_line = getline('.')
+  let l:default = l:current_line =~ '^\s*[#/"\*].*' ? l:current_line : ''
+  let l:instruction = input('🚀 Generate code: ', l:default)
+  if empty(l:instruction)
+    return
+  endif
+
+  let l:prompt = printf(
+        \ "Generate %s code for: %s\n\nFile context: %s (%s)\n\nProvide only the code without explanations:",
+        \ expand('%:e'), l:instruction, expand('%:t'), &filetype
+        \ )
+
+  " For generate/edit, streaming is less convenient because we want the final text.
+  " Temporarily force non-streaming JSON for these operations.
+  let l:old_fmt = get(g:, 'cursor_cli_output_format', 'stream-json')
+  let g:cursor_cli_output_format = 'json'
+  let l:result = cursor_cli#exec(s:prompt_with_context(l:prompt))
+  let g:cursor_cli_output_format = l:old_fmt
+
+  if !empty(l:result)
+    call append(line('.'), split(l:result, "\n"))
+    echo printf("✅ Generated %d lines of code!", len(split(l:result, "\n")))
+  endif
 endfunction
 
-" Fix errors in selected code
-function! CursorFix() range
-    let l:lines = getline(a:firstline, a:lastline)
-    let l:code = join(l:lines, '\n')
-    
-    let l:prompt = printf("Fix any errors or bugs in this %s code:\n\nFile: %s\n\nCode with issues:\n%s\n\nProvide only the corrected code:", expand('%:e'), expand('%:t'), l:code)
-    let l:result = cursor_cli#exec(l:prompt)
-    
-    if !empty(l:result)
-        call cursor_cli#create_result_buffer('Fix', "ORIGINAL:\n" . l:code . "\n\nFIXED:\n" . l:result, 'vnew')
-        
-        echo "Apply fix? (y/n): "
-        let l:choice = nr2char(getchar())
-        
-        if l:choice ==# 'y'
-            execute a:firstline . ',' . a:lastline . 'delete'
-            call append(a:firstline - 1, split(l:result, '\n'))
-            echo "✅ Code fixed!"
-        else
-            bwipeout __CursorFix__
-            echo "❌ Fix discarded"
-        endif
-    endif
+" Edit selected code with AI instructions (shows diff, optional apply)
+function! CursorEdit() range abort
+  let l:instruction = input('✏️  Edit instruction: ')
+  if empty(l:instruction)
+    return
+  endif
+
+  let [l:original_code, l:start_line, l:end_line] = s:get_visual_or_line(a:firstline, a:lastline)
+  let l:prompt = printf(
+        \ "Edit this %s code according to the instruction.\n\nFile: %s\nInstruction: %s\n\nOriginal code:\n%s\n\nProvide only the edited code:",
+        \ expand('%:e'), expand('%:t'), l:instruction, l:original_code
+        \ )
+
+  " Use non-streaming for edit so we can apply exact final output
+  let l:old_fmt = get(g:, 'cursor_cli_output_format', 'stream-json')
+  let g:cursor_cli_output_format = 'json'
+  let l:result = cursor_cli#exec(s:prompt_with_context(l:prompt))
+  let g:cursor_cli_output_format = l:old_fmt
+
+  if empty(l:result)
+    echo "❌ No edit returned"
+    return
+  endif
+
+  call cursor_cli#create_result_buffer('Diff', "ORIGINAL:\n" . l:original_code . "\n\nEDITED:\n" . l:result, 'vnew')
+
+  echo "Apply changes? (y/n): "
+  let l:choice = nr2char(getchar())
+
+  if l:choice ==# 'y'
+    execute l:start_line . ',' . l:end_line . 'delete'
+    call append(l:start_line - 1, split(l:result, "\n"))
+    echo "✅ Changes applied!"
+  else
+    " Close diff buffer by name (best-effort)
+    silent! bwipeout __CursorDiff__
+    echo "❌ Changes discarded"
+  endif
 endfunction
 
-" Quick refactor with context menu
-function! CursorRefactor() range
-    echo "Refactor options:"
-    echo "1. Extract function"
-    echo "2. Rename variable" 
-    echo "3. Add comments"
-    echo "4. Simplify logic"
-    echo "5. Custom instruction"
-    
-    let l:choice = nr2char(getchar())
-    let l:instruction = ""
-    
-    if l:choice == '1'
-        let l:instruction = 'Extract this code into a well-named function'
-    elseif l:choice == '2'
-        let l:instruction = 'Rename variables to be more descriptive'
-    elseif l:choice == '3'
-        let l:instruction = 'Add helpful comments to explain the code'
-    elseif l:choice == '4'
-        let l:instruction = 'Simplify the logic while maintaining functionality'
-    elseif l:choice == '5'
-        let l:instruction = input('Custom refactor instruction: ')
-    else
-        echo "Invalid choice"
-        return
+" Optimize selected code (shows diff, optional apply)
+function! CursorOptimize() range abort
+  let l:code = join(getline(a:firstline, a:lastline), "\n")
+  if empty(trim(l:code))
+    echo "No code selected to optimize"
+    return
+  endif
+
+  let l:prompt = printf(
+        \ "Optimize this %s code for better performance and readability:\n\nFile: %s\n\nOriginal code:\n%s\n\nProvide only the optimized code:",
+        \ expand('%:e'), expand('%:t'), l:code
+        \ )
+
+  let l:old_fmt = get(g:, 'cursor_cli_output_format', 'stream-json')
+  let g:cursor_cli_output_format = 'json'
+  let l:result = cursor_cli#exec(s:prompt_with_context(l:prompt))
+  let g:cursor_cli_output_format = l:old_fmt
+
+  if empty(l:result)
+    echo "❌ No optimization returned"
+    return
+  endif
+
+  call cursor_cli#create_result_buffer('Optimization', "ORIGINAL:\n" . l:code . "\n\nOPTIMIZED:\n" . l:result, 'vnew')
+
+  echo "Apply optimization? (y/n): "
+  let l:choice = nr2char(getchar())
+
+  if l:choice ==# 'y'
+    execute a:firstline . ',' . a:lastline . 'delete'
+    call append(a:firstline - 1, split(l:result, "\n"))
+    echo "✅ Code optimized!"
+  else
+    silent! bwipeout __CursorOptimization__
+    echo "❌ Optimization discarded"
+  endif
+endfunction
+
+" Fix errors in selected code (shows diff, optional apply)
+function! CursorFix() range abort
+  let l:code = join(getline(a:firstline, a:lastline), "\n")
+  if empty(trim(l:code))
+    echo "No code selected to fix"
+    return
+  endif
+
+  let l:prompt = printf(
+        \ "Fix any errors or bugs in this %s code:\n\nFile: %s\n\nCode with issues:\n%s\n\nProvide only the corrected code:",
+        \ expand('%:e'), expand('%:t'), l:code
+        \ )
+
+  let l:old_fmt = get(g:, 'cursor_cli_output_format', 'stream-json')
+  let g:cursor_cli_output_format = 'json'
+  let l:result = cursor_cli#exec(s:prompt_with_context(l:prompt))
+  let g:cursor_cli_output_format = l:old_fmt
+
+  if empty(l:result)
+    echo "❌ No fix returned"
+    return
+  endif
+
+  call cursor_cli#create_result_buffer('Fix', "ORIGINAL:\n" . l:code . "\n\nFIXED:\n" . l:result, 'vnew')
+
+  echo "Apply fix? (y/n): "
+  let l:choice = nr2char(getchar())
+
+  if l:choice ==# 'y'
+    execute a:firstline . ',' . a:lastline . 'delete'
+    call append(a:firstline - 1, split(l:result, "\n"))
+    echo "✅ Code fixed!"
+  else
+    silent! bwipeout __CursorFix__
+    echo "❌ Fix discarded"
+  endif
+endfunction
+
+" Quick refactor with a mini menu
+function! CursorRefactor() range abort
+  echo "Refactor options:"
+  echo "1. Extract function"
+  echo "2. Rename variable"
+  echo "3. Add comments"
+  echo "4. Simplify logic"
+  echo "5. Custom instruction"
+
+  let l:choice = nr2char(getchar())
+  let l:instruction = ""
+
+  if l:choice ==# '1'
+    let l:instruction = 'Extract this code into a well-named function'
+  elseif l:choice ==# '2'
+    let l:instruction = 'Rename variables to be more descriptive'
+  elseif l:choice ==# '3'
+    let l:instruction = 'Add helpful comments to explain the code'
+  elseif l:choice ==# '4'
+    let l:instruction = 'Simplify the logic while maintaining functionality'
+  elseif l:choice ==# '5'
+    let l:instruction = input('Custom refactor instruction: ')
+    if empty(l:instruction)
+      return
     endif
-    
-    " Use the edit function with refactor instruction
-    let l:lines = getline(a:firstline, a:lastline)
-    let l:code = join(l:lines, '\n')
-    
-    let l:prompt = printf("Refactor this %s code: %s\n\nFile: %s\n\nOriginal code:\n%s\n\nProvide only the refactored code:", expand('%:e'), l:instruction, expand('%:t'), l:code)
-    let l:result = cursor_cli#exec(l:prompt)
-    
-    if !empty(l:result)
-        call cursor_cli#create_result_buffer('Refactor', "ORIGINAL:\n" . l:code . "\n\nREFACTORED:\n" . l:result, 'vnew')
-        
-        echo "Apply refactor? (y/n): "
-        let l:apply = nr2char(getchar())
-        
-        if l:apply ==# 'y'
-            execute a:firstline . ',' . a:lastline . 'delete'
-            call append(a:firstline - 1, split(l:result, '\n'))
-            echo "✅ Code refactored!"
-        else
-            bwipeout __CursorRefactor__
-            echo "❌ Refactor discarded"
-        endif
-    endif
+  else
+    echo "Invalid choice"
+    return
+  endif
+
+  let l:code = join(getline(a:firstline, a:lastline), "\n")
+  if empty(trim(l:code))
+    echo "No code selected"
+    return
+  endif
+
+  let l:prompt = printf(
+        \ "Refactor this %s code: %s\n\nFile: %s\n\nOriginal code:\n%s\n\nProvide only the refactored code:",
+        \ expand('%:e'), l:instruction, expand('%:t'), l:code
+        \ )
+
+  let l:old_fmt = get(g:, 'cursor_cli_output_format', 'stream-json')
+  let g:cursor_cli_output_format = 'json'
+  let l:result = cursor_cli#exec(s:prompt_with_context(l:prompt))
+  let g:cursor_cli_output_format = l:old_fmt
+
+  if empty(l:result)
+    echo "❌ No refactor returned"
+    return
+  endif
+
+  call cursor_cli#create_result_buffer('Refactor', "ORIGINAL:\n" . l:code . "\n\nREFACTORED:\n" . l:result, 'vnew')
+
+  echo "Apply refactor? (y/n): "
+  let l:apply = nr2char(getchar())
+
+  if l:apply ==# 'y'
+    execute a:firstline . ',' . a:lastline . 'delete'
+    call append(a:firstline - 1, split(l:result, "\n"))
+    echo "✅ Code refactored!"
+  else
+    silent! bwipeout __CursorRefactor__
+    echo "❌ Refactor discarded"
+  endif
 endfunction
 
 " Test Cursor CLI with a simple prompt
-function! CursorTest()
-    echo "Testing Cursor CLI connection..."
-    let l:result = cursor_cli#exec("Just say 'Hello from Cursor!' - this is a test")
-    if !empty(l:result)
-        echo "✅ Test successful! Response: " . l:result[:100] . (len(l:result) > 100 ? "..." : "")
-    else
-        echo "❌ Test failed - check the error messages above"
-    endif
+function! CursorTest() abort
+  echo "Testing Cursor CLI connection..."
+  let l:old_fmt = get(g:, 'cursor_cli_output_format', 'stream-json')
+  let g:cursor_cli_output_format = 'json'
+  let l:result = cursor_cli#exec("Just say 'Hello from Cursor!' - this is a test")
+  let g:cursor_cli_output_format = l:old_fmt
+
+  if !empty(l:result)
+    echo "✅ Test successful! Response: " . l:result[:100] . (len(l:result) > 100 ? "..." : "")
+  else
+    echo "❌ Test failed - check :messages for errors"
+  endif
 endfunction
 
-" ===================================================================
-" Commands
-" ===================================================================
+" Stop the most recent streaming job in the current Cursor buffer
+function! CursorStop() abort
+  let l:jobid = getbufvar(bufnr('%'), 'cursor_cli_jobid', -1)
+  if l:jobid == -1
+    echo "No Cursor job associated with this buffer"
+    return
+  endif
+  call cursor_cli#cancel(l:jobid)
+endfunction
 
+" -------------------------------------------------------------------
+" Commands
+" -------------------------------------------------------------------
 command! CursorChat call CursorChat()
 command! -range CursorEdit <line1>,<line2>call CursorEdit()
 command! CursorGenerate call CursorGenerate()
@@ -279,4 +353,8 @@ command! -range CursorRefactor <line1>,<line2>call CursorRefactor()
 
 " Status and test functions
 command! CursorStatus echo cursor_cli#available() ? "✅ Cursor CLI available" : "❌ Cursor CLI not found"
-command! CursorTest call CursorTest() 
+command! CursorTest call CursorTest()
+
+" Streaming-specific commands
+command! -nargs=1 CursorStream call cursor_cli#exec_stream(<q-args>)
+command! CursorStop call CursorStop()
