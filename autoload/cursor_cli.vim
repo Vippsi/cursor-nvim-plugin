@@ -8,7 +8,7 @@
 "
 " Optional globals:
 "   let g:cursor_cli_command = 'cursor-agent'
-"   let g:cursor_cli_model = 'opus-4.5-thinking'     " or 'auto', etc.
+"   let g:cursor_cli_model = 'opus-4.5-thinking'
 "   let g:cursor_cli_output_format = 'stream-json'   " 'stream-json' | 'json' | 'text'
 "   let g:cursor_cli_open = 'botright split'
 "   let g:cursor_cli_height = 15
@@ -119,7 +119,6 @@ function! cursor_cli#exec_stream(prompt) abort
   let l:bufnr = cursor_cli#create_result_buffer('Stream', "Cursor AI working...\n\n", 'enew')
   let l:start_time = localtime()
 
-  " pty=true helps cursor-agent flush incrementally
   let l:jobid = jobstart(l:args, {
         \ 'pty': v:true,
         \ 'stdout_buffered': v:false,
@@ -360,23 +359,19 @@ function! cursor_cli#repl_open() abort
 
   let l:open_cmd = get(g:, 'cursor_cli_open', 'botright split')
   let l:height = get(g:, 'cursor_cli_height', 15)
-
   execute l:open_cmd
   execute 'resize ' . l:height
 
-  " termopen runs an interactive job. No --print, no --output-format.
   let l:cmd = get(g:, 'cursor_cli_command', 'cursor-agent')
   let l:model = get(g:, 'cursor_cli_model', '')
-
   let l:argv = [l:cmd]
   if !empty(l:model)
     call extend(l:argv, ['--model', l:model])
   endif
 
-  " Create a dedicated terminal buffer
+  " Create a dedicated terminal buffer by termopen() (DO NOT set buftype yourself)
   execute 'enew'
   execute 'file __CursorREPL__'
-  setlocal buftype=terminal
   setlocal bufhidden=hide
   setlocal noswapfile
 
@@ -387,23 +382,17 @@ function! cursor_cli#repl_open() abort
         \ 'on_exit': function('cursor_cli#_repl_on_exit'),
         \ })
 
-  " Convenience: store job id for send/stop
   let b:cursor_cli_repl_jobid = s:repl.jobid
-
-  " Enter insert so you can type immediately
   startinsert
 endfunction
 
 function! cursor_cli#_repl_on_exit(jobid, code, event) abort
-  " Mark REPL as dead; buffer may still exist
   let s:repl.jobid = -1
 endfunction
 
 function! cursor_cli#repl_toggle() abort
   if s:repl.winid != -1 && win_id2win(s:repl.winid) != 0
-    " If focused, hide; else focus
     if win_getid() == s:repl.winid
-      " close window but keep buffer
       execute 'close'
       return
     endif
@@ -412,7 +401,6 @@ function! cursor_cli#repl_toggle() abort
     return
   endif
 
-  " If buffer exists but window closed, reopen it
   if s:repl.bufnr != -1 && bufexists(s:repl.bufnr)
     let l:open_cmd = get(g:, 'cursor_cli_open', 'botright split')
     let l:height = get(g:, 'cursor_cli_height', 15)
@@ -424,11 +412,9 @@ function! cursor_cli#repl_toggle() abort
     return
   endif
 
-  " Otherwise start fresh
   call cursor_cli#repl_open()
 endfunction
 
-" Send text to REPL (opens it if needed)
 function! cursor_cli#repl_send(text) abort
   if !has('nvim')
     echohl ErrorMsg | echo "REPL requires Neovim." | echohl None
@@ -439,12 +425,10 @@ function! cursor_cli#repl_send(text) abort
     call cursor_cli#repl_open()
   endif
 
-  " Ensure it’s visible (optional but nice)
   if s:repl.winid != -1 && win_id2win(s:repl.winid) != 0
     call win_gotoid(s:repl.winid)
   endif
 
-  " Send line + newline
   call chansend(s:repl.jobid, a:text . "\n")
   startinsert
 endfunction
